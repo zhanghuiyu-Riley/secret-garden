@@ -2,6 +2,8 @@
 
 一座会呼吸的秘密花园。点击地面播种，看花在昼夜流转中抽茎、舒展、发光。
 
+### 👉 [**在线预览 zhanghuiyu-riley.github.io/secret-garden**](https://zhanghuiyu-riley.github.io/secret-garden/)
+
 **单文件 · 零依赖 · 零构建** —— 打开 `index.html` 即可。
 
 ---
