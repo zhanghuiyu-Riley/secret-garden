@@ -1,0 +1,946 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#080c18">
+<meta name="description" content="一座会呼吸的秘密花园 —— 点击播种，看花在昼夜流转中生长。">
+<title>秘密花园 · Secret Garden</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;overflow:hidden;background:#05080f}
+  body{
+    font-family:"Optima","Palatino Linotype",Palatino,"Songti SC",STSong,"SimSun",serif;
+    -webkit-tap-highlight-color:transparent;
+    cursor:crosshair;
+  }
+  canvas{display:block;position:fixed;inset:0;touch-action:none}
+
+  /* ---------- HUD ---------- */
+  .hud{position:fixed;inset:0;pointer-events:none;z-index:2}
+  .title{
+    position:absolute;top:clamp(22px,5vh,60px);left:0;right:0;text-align:center;
+    color:#f2ece0;letter-spacing:.42em;text-indent:.42em;
+    font-size:clamp(20px,3.4vw,34px);font-weight:400;
+    text-shadow:0 2px 30px rgba(0,0,0,.85),0 0 60px rgba(160,200,255,.25);
+    opacity:.94;transition:opacity 1.6s ease;
+  }
+  .subtitle{
+    position:absolute;top:calc(clamp(22px,5vh,60px) + clamp(34px,5.4vh,54px));
+    left:0;right:0;text-align:center;
+    color:#a9b6cf;letter-spacing:.3em;text-indent:.3em;
+    font-size:clamp(9px,1.15vw,12px);text-transform:uppercase;
+    text-shadow:0 1px 18px rgba(0,0,0,.9);
+    opacity:.6;transition:opacity 1.6s ease;
+  }
+  .panel{
+    position:absolute;left:clamp(16px,3vw,34px);bottom:clamp(16px,3vh,30px);
+    display:flex;flex-direction:column;gap:10px;
+    font-family:"Palatino Linotype",Palatino,"Songti SC",serif;
+    transition:opacity 1.4s ease;
+  }
+  .stat{display:flex;align-items:baseline;gap:9px;color:#dfe6f2;text-shadow:0 1px 14px rgba(0,0,0,.9)}
+  .stat .num{font-size:clamp(22px,3.2vw,30px);line-height:1;letter-spacing:.02em;font-variant-numeric:tabular-nums}
+  .stat .lbl{font-size:11px;letter-spacing:.24em;color:#8fa0bd}
+  .hint{
+    color:#7d8ca6;font-size:11.5px;letter-spacing:.14em;line-height:1.9;
+    transition:color .6s ease;
+  }
+  .hint b{color:#b9c8e0;font-weight:400}
+  .clock{
+    position:absolute;right:clamp(16px,3vw,34px);bottom:clamp(16px,3vh,30px);
+    text-align:right;color:#8fa0bd;font-size:11px;letter-spacing:.24em;
+    text-shadow:0 1px 14px rgba(0,0,0,.9);transition:opacity 1.4s ease;
+  }
+  .clock .phase{color:#dfe6f2;display:block;font-size:13px;letter-spacing:.3em;margin-bottom:3px}
+  .quiet .title,.quiet .subtitle,.quiet .panel,.quiet .clock{opacity:.16}
+  .quiet .quiet-keep{opacity:1 !important}
+</style>
+</head>
+<body>
+<canvas id="garden"></canvas>
+
+<div class="hud" id="hud">
+  <div class="title">秘 密 花 园</div>
+  <div class="subtitle">secret garden</div>
+
+  <div class="panel">
+    <div class="stat">
+      <span class="num" id="count">0</span>
+      <span class="lbl">朵花在生长</span>
+    </div>
+    <div class="hint" id="hint">
+      <b>点击地面</b>播种 · <b>点击花朵</b>授粉<br>
+      <b>C</b> 昼夜 &nbsp;·&nbsp; <b>R</b> 清园
+    </div>
+  </div>
+
+  <div class="clock">
+    <span class="phase" id="phase">夜</span>
+    <span id="clockText">00:00</span>
+  </div>
+</div>
+
+<script>
+(() => {
+'use strict';
+
+/* ═══════════════════════════════════════════════════════════
+   秘密花园 — 生成式花园画布
+   单文件 · 零依赖 · Canvas 2D
+   ═══════════════════════════════════════════════════════════ */
+
+const TAU = Math.PI * 2;
+const cvs = document.getElementById('garden');
+const ctx = cvs.getContext('2d');
+const hud = document.getElementById('hud');
+const elCount = document.getElementById('count');
+const elPhase = document.getElementById('phase');
+const elClock = document.getElementById('clockText');
+const elHint = document.getElementById('hint');
+
+let W = 0, H = 0, DPR = 1, HORIZON = 0;
+
+/* ───────────── 数学工具 ───────────── */
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+const smoothstep = (e0, e1, x) => { const t = clamp((x - e0) / (e1 - e0), 0, 1); return t * t * (3 - 2 * t); };
+const easeOutBack = t => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); };
+
+/** 确定性伪随机：同一个种子永远长出同一朵花 */
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+/* ───────────── 颜色 ───────────── */
+function hex2rgb(h) {
+  h = h.replace('#', '');
+  if (h.length === 3) h = h.split('').map(c => c + c).join('');
+  const n = parseInt(h, 16);
+  return [n >> 16 & 255, n >> 8 & 255, n & 255];
+}
+function mixColor(a, b, t) {
+  const A = hex2rgb(a), B = hex2rgb(b);
+  return 'rgb(' + Math.round(lerp(A[0], B[0], t)) + ',' +
+                  Math.round(lerp(A[1], B[1], t)) + ',' +
+                  Math.round(lerp(A[2], B[2], t)) + ')';
+}
+function rgba(hex, a) {
+  const c = hex2rgb(hex);
+  return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')';
+}
+/** 朝白色提亮 */
+function lighten(hex, t) { return mixColor(hex, '#ffffff', t); }
+/** 朝夜晚色压暗 */
+function darken(hex, t) { return mixColor(hex, '#060a12', t); }
+
+/* ───────────── 调色板 ───────────── */
+const PALETTES = [
+  { name: '绯樱', petals: ['#ffc2d4', '#ff86a8'], heart: '#ffeaad', glow: '#ff9ec4' },
+  { name: '月见', petals: ['#ddc9ff', '#a98cff'], heart: '#fff3c4', glow: '#b79bff' },
+  { name: '晨曦', petals: ['#ffeaa8', '#ffc247'], heart: '#fff8e0', glow: '#ffcf6b' },
+  { name: '薄荷', petals: ['#c2f3e0', '#7ad6b6'], heart: '#fffbdf', glow: '#93e6c8' },
+  { name: '珊瑚', petals: ['#ffcdb8', '#ff9a75'], heart: '#fff1cc', glow: '#ffab8a' },
+  { name: '雾蓝', petals: ['#c9e8ff', '#8ac0ef'], heart: '#fff8e0', glow: '#a3d2ff' },
+  { name: '暮夜', petals: ['#9aa6e0', '#5e6cb8'], heart: '#e9edff', glow: '#8494e0' },
+];
+const SPECIES = ['雏菊', '铃兰', '蒲公英', '玫瑰', '星芒'];
+
+/* ───────────── 世界状态 ───────────── */
+const CYCLE = 150;          // 一昼夜秒数
+const GROW_TIME = 2.0;      // 生长动画时长
+const MAX_FLOWERS = 170;
+
+const state = {
+  clock: 0.78,              // 0=午夜 0.25=日出 0.5=正午 0.75=日落 —— 开场是夜
+  dayTime: 0,               // 独立累积的世界时间（秒）
+  tDay: 0, tTwilight: 0, sun: 0,
+  wind: 0,
+  flowers: [],
+  fireflies: [],
+  particles: [],
+  ripples: [],
+  stars: [],
+  blades: [],
+  hills: [],
+  hoverX: -999, hoverY: -999,
+  lastPlant: 0,
+};
+
+/* ───────────── 尺寸 / 布局 ───────────── */
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth;
+  H = window.innerHeight;
+  cvs.width = Math.round(W * DPR);
+  cvs.height = Math.round(H * DPR);
+  cvs.style.width = W + 'px';
+  cvs.style.height = H + 'px';
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  HORIZON = Math.round(H * 0.7);
+
+  buildStars();
+  buildHills();
+  buildBlades();
+  // 重铺萤火虫，避免缩放后跑到画面外
+  state.fireflies = [];
+  const ff = Math.round(clamp(W * H / 42000, 14, 46));
+  for (let i = 0; i < ff; i++) state.fireflies.push(makeFirefly());
+}
+
+function buildStars() {
+  const rnd = mulberry32(0x5EED);
+  const n = Math.round(clamp(W * H / 7200, 60, 320));
+  state.stars = [];
+  for (let i = 0; i < n; i++) {
+    state.stars.push({
+      x: rnd() * W,
+      y: rnd() * HORIZON * 0.94,
+      r: 0.35 + rnd() * 1.25,
+      ph: rnd() * TAU,
+      sp: 0.4 + rnd() * 1.6,
+    });
+  }
+}
+
+/* 山脊参数只生成一次，resize 时复用 —— 保证轮廓稳定 */
+function buildHills() {
+  const r = mulberry32(0x1A2B3C);
+  const layers = [
+    { off: -34, amp: 62, tone: '#3d5566', toneN: '#0d1620' },
+    { off: -13, amp: 40, tone: '#2f4a44', toneN: '#0a1216' },
+    { off:   2, amp: 22, tone: '#22382c', toneN: '#070d0b' },
+  ];
+  state.hills = layers.map((L, i) => {
+    const a1 = L.amp * (0.55 + r() * 0.6), f1 = 0.7 + r() * 0.8, p1 = r() * TAU;
+    const a2 = L.amp * (0.28 + r() * 0.4), f2 = 1.9 + r() * 1.5, p2 = r() * TAU;
+    return { ...L, a1, f1, p1, a2, f2, p2, drift: (i + 1) * 0.06 * (i % 2 ? -1 : 1) };
+  });
+}
+
+function buildBlades() {
+  const rnd = mulberry32(0xB1ADE);
+  const n = Math.round(clamp(W / 3.2, 120, 560));
+  state.blades = [];
+  for (let i = 0; i < n; i++) {
+    const x = rnd() * W;
+    state.blades.push({
+      x,
+      y: HORIZON + 6 + Math.pow(rnd(), 0.55) * (H - HORIZON - 6),
+      h: 5 + rnd() * 17,
+      bend: (rnd() - 0.5) * 0.9,
+      ph: rnd() * TAU,
+    });
+  }
+}
+
+function hillY(L, x) {
+  const u = x / Math.max(W, 1);
+  return HORIZON + L.off
+    + Math.sin(u * TAU * L.f1 + L.p1) * L.a1
+    + Math.sin(u * TAU * L.f2 + L.p2) * L.a2;
+}
+
+/* ═════════════ 花 ═════════════ */
+function makeFlower(x, y, seed, plantedAt) {
+  const rnd = mulberry32(seed);
+  const scale = 0.78 + rnd() * 0.55;
+  return {
+    x, y, seed,
+    species: Math.floor(rnd() * 5),
+    palette: PALETTES[Math.floor(rnd() * PALETTES.length)],
+    stemH: (58 + rnd() * 128) * scale,
+    headR: (9 + rnd() * 15) * scale,
+    petalCount: 5 + Math.floor(rnd() * 4),
+    rot: rnd() * TAU,
+    lean: (rnd() - 0.5) * 0.42,
+    curve: (rnd() - 0.5) * 46,
+    bulge: 0.55 + rnd() * 0.85,
+    swayPhase: rnd() * TAU,
+    swayAmp: 2.6 + rnd() * 6.5,
+    bloom: rnd() * TAU,
+    plantedAt,
+    growth: 0,
+    tipX: x, tipY: y,
+  };
+}
+
+function drawFlower(f, now) {
+  const age = (now - f.plantedAt) / 1000;
+  const raw = clamp(age / GROW_TIME, 0, 1);
+  f.growth = raw;                 // findFlowerAt 依赖它判断"花是否长成"
+  const g = easeOutBack(raw);
+  if (raw <= 0) return;
+
+  const { tDay } = state;
+  const nightGlow = 0.32 + 0.68 * (1 - tDay);
+
+  // 风 + 朝向鼠标的微倾
+  const wind = state.wind;
+  const sway = (Math.sin(now * 0.0013 + f.swayPhase) * f.swayAmp + wind * f.swayAmp * 1.7) * g;
+
+  // 靠近鼠标时轻轻倾身（"追光"）
+  const dxh = state.hoverX - f.x, dyh = state.hoverY - f.tipY;
+  const dist = Math.hypot(dxh, dyh);
+  const leanX = dist < 260 ? clamp(dxh / 260, -1, 1) * 9 * (1 - dist / 260) : 0;
+
+  const tipX = f.x + f.lean * f.stemH * g + sway + leanX;
+  const tipY = f.y - f.stemH * g;
+  f.tipX = tipX; f.tipY = tipY;
+
+  const cxp = f.x + f.curve * g * 0.5 + sway * 0.35;
+  const cyp = f.y - f.stemH * g * 0.55;
+
+  // ── 茎 ──
+  const stemCol = mixColor('#3d7a4e', '#274d34', tDay * 0.55);
+  ctx.strokeStyle = stemCol;
+  ctx.lineCap = 'round';
+  ctx.lineWidth = (1.5 + 1.3 * f.bulge) * Math.min(g, 1.05);
+  ctx.beginPath();
+  ctx.moveTo(f.x, f.y);
+  ctx.quadraticCurveTo(cxp, cyp, tipX, tipY);
+  ctx.stroke();
+
+  // ── 叶 ──
+  if (g > 0.42) {
+    const lg = clamp((raw - 0.35) / 0.4, 0, 1);
+    for (const t of [0.42, 0.66]) {
+      const p = qPoint(f.x, f.y, cxp, cyp, tipX, tipY, t);
+      const dir = t === 0.42 ? 1 : -1;
+      const lw = f.headR * 0.95 * lg;
+      const ll = f.headR * 1.7 * lg;
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(dir * 1.15 + sway * 0.012 + dir * Math.sin(now * 0.001 + f.swayPhase) * 0.06);
+      ctx.fillStyle = mixColor('#3f8352', '#20422c', tDay * 0.5);
+      petalPath(ctx, ll, lw * 0.42);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  // ── 花头 ──
+  if (raw > 0.5) {
+    const bg = clamp((raw - 0.42) / 0.58, 0, 1);
+    const bgE = easeOutBack(bg);
+    const r = f.headR * bgE;
+    const rot = f.rot + sway * 0.01 + Math.sin(now * 0.0007 + f.bloom) * 0.05;
+
+    // 柔光晕（夜间更亮）
+    const glowR = r * 3.1;
+    const grd = ctx.createRadialGradient(tipX, tipY, 0, tipX, tipY, glowR);
+    grd.addColorStop(0, rgba(f.palette.glow, 0.36 * nightGlow));
+    grd.addColorStop(0.45, rgba(f.palette.glow, 0.13 * nightGlow));
+    grd.addColorStop(1, rgba(f.palette.glow, 0));
+    ctx.fillStyle = grd;
+    ctx.beginPath(); ctx.arc(tipX, tipY, glowR, 0, TAU); ctx.fill();
+
+    ctx.save();
+    ctx.translate(tipX, tipY);
+    ctx.rotate(rot);
+    drawBloom(ctx, f, r, tDay, now);
+    ctx.restore();
+  }
+}
+
+/** 二次贝塞尔取点 */
+function qPoint(x0, y0, x1, y1, x2, y2, t) {
+  const mt = 1 - t;
+  return {
+    x: mt * mt * x0 + 2 * mt * t * x1 + t * t * x2,
+    y: mt * mt * y0 + 2 * mt * t * y1 + t * t * y2,
+  };
+}
+
+/** 花瓣轮廓（朝上，长 len，半宽 wid） */
+function petalPath(c, len, wid) {
+  c.beginPath();
+  c.moveTo(0, 0);
+  c.bezierCurveTo(wid, -len * 0.28, wid, -len * 0.78, 0, -len);
+  c.bezierCurveTo(-wid, -len * 0.78, -wid, -len * 0.28, 0, 0);
+  c.closePath();
+}
+
+/** 按物种绘制花冠（原点已平移至花心） */
+function drawBloom(c, f, r, tDay, now) {
+  const P = f.palette;
+  const lit = tDay;                      // 0 夜 → 1 昼
+  const cA = mixColor(P.petals[1], P.petals[0], 0.35 + lit * 0.4);
+  const cB = mixColor(P.petals[0], '#ffffff', 0.12 + lit * 0.3);
+  const cHeart = mixColor(P.heart, '#ffffff', lit * 0.35);
+
+  switch (f.species) {
+
+    /* 0 ── 雏菊：放射花瓣 */
+    case 0: {
+      const n = f.petalCount;
+      for (let i = 0; i < n; i++) {
+        c.save();
+        c.rotate((i / n) * TAU);
+        c.fillStyle = i % 2 ? cB : cA;
+        petalPath(c, r * 1.55, r * 0.46);
+        c.fill();
+        c.restore();
+      }
+      c.fillStyle = cHeart;
+      c.beginPath(); c.arc(0, 0, r * 0.42, 0, TAU); c.fill();
+      c.fillStyle = rgba(P.glow, 0.5);
+      c.beginPath(); c.arc(0, 0, r * 0.22, 0, TAU); c.fill();
+      break;
+    }
+
+    /* 1 ── 铃兰：垂铃 */
+    case 1: {
+      c.strokeStyle = 'rgba(120,190,150,.5)';
+      c.lineWidth = 1.2;
+      for (let i = 0; i < 3; i++) {
+        const a = -0.35 + i * 0.35;
+        const d = r * (1.15 + i * 0.28);
+        const bx = Math.sin(a) * d, by = Math.cos(a) * d;
+        c.save();
+        c.translate(bx, by);
+        c.rotate(a + Math.sin(now * 0.0016 + i) * 0.07);
+        c.fillStyle = i % 2 ? cB : cA;
+        c.beginPath();
+        c.moveTo(-r * 0.42, 0);
+        c.bezierCurveTo(-r * 0.62, r * 0.95, r * 0.62, r * 0.95, r * 0.42, 0);
+        c.bezierCurveTo(r * 0.24, r * 0.2, -r * 0.24, r * 0.2, -r * 0.42, 0);
+        c.fill();
+        c.fillStyle = rgba(P.heart, 0.85);
+        c.beginPath(); c.arc(0, r * 0.62, r * 0.14, 0, TAU); c.fill();
+        c.restore();
+      }
+      break;
+    }
+
+    /* 2 ── 蒲公英：绒球 */
+    case 2: {
+      const n = Math.round(f.petalCount * 4.5);
+      for (let i = 0; i < n; i++) {
+        const a = (i / n) * TAU + f.rot;
+        const jitter = 0.82 + ((i * 2654435761) % 1000) / 1000 * 0.3;
+        const len = r * 1.85 * jitter;
+        const ex = Math.cos(a) * len, ey = Math.sin(a) * len;
+        c.strokeStyle = rgba(P.petals[0], 0.5 + lit * 0.2);
+        c.lineWidth = 0.75;
+        c.beginPath(); c.moveTo(0, 0); c.lineTo(ex, ey); c.stroke();
+        c.fillStyle = rgba('#ffffff', 0.55 + lit * 0.2);
+        c.beginPath(); c.arc(ex, ey, 0.9 + lit * 0.5, 0, TAU); c.fill();
+      }
+      c.fillStyle = rgba(P.heart, 0.4);
+      c.beginPath(); c.arc(0, 0, r * 0.5, 0, TAU); c.fill();
+      break;
+    }
+
+    /* 3 ── 玫瑰：层叠 */
+    case 3: {
+      const rings = 3;
+      for (let k = rings - 1; k >= 0; k--) {
+        const rr = r * (0.62 + k * 0.42);
+        const n = f.petalCount + k * 2;
+        const off = k * 0.62;
+        for (let i = 0; i < n; i++) {
+          c.save();
+          c.rotate((i / n) * TAU + off);
+          c.fillStyle = k === 0 ? cHeart : (i % 2 ? cB : cA);
+          c.globalAlpha = k === 0 ? 0.95 : 1 - k * 0.12;
+          petalPath(c, rr * 0.95, rr * 0.5);
+          c.fill();
+          c.restore();
+        }
+      }
+      c.globalAlpha = 1;
+      c.fillStyle = rgba(P.glow, 0.42);
+      c.beginPath(); c.arc(0, 0, r * 0.3, 0, TAU); c.fill();
+      break;
+    }
+
+    /* 4 ── 星芒 */
+    default: {
+      const n = 6;
+      for (let i = 0; i < n; i++) {
+        c.save();
+        c.rotate((i / n) * TAU);
+        c.fillStyle = i % 2 ? cA : cB;
+        const L = r * (i % 2 ? 1.5 : 2.15);
+        const w = r * (i % 2 ? 0.3 : 0.42);
+        c.beginPath();
+        c.moveTo(0, 0);
+        c.quadraticCurveTo(w, -L * 0.5, 0, -L);
+        c.quadraticCurveTo(-w, -L * 0.5, 0, 0);
+        c.fill();
+        c.restore();
+      }
+      c.fillStyle = rgba('#ffffff', 0.5 + lit * 0.4);
+      c.beginPath(); c.arc(0, 0, r * 0.3, 0, TAU); c.fill();
+      break;
+    }
+  }
+}
+
+/* ═════════════ 萤火虫 ═════════════ */
+function makeFirefly() {
+  const r = mulberry32((Math.random() * 1e9) | 0);
+  return {
+    x: r() * W, y: HORIZON * 0.35 + r() * (H - HORIZON * 0.5),
+    vx: (r() - 0.5) * 0.22, vy: (r() - 0.5) * 0.16,
+    ph: r() * TAU, sp: 0.6 + r() * 1.9,
+    target: null, retarget: r() * 3,
+    hue: r() < 0.25 ? '#b9ffd8' : '#ffe89a',
+    size: 1.3 + r() * 1.5,
+  };
+}
+
+function updateFireflies(dt, now) {
+  const { tDay } = state;
+  const energy = 0.35 + 0.65 * (1 - tDay);   // 夜里活跃，白天蛰伏
+  const flowers = state.flowers;
+
+  for (const f of state.fireflies) {
+    f.retarget -= dt;
+    if (f.retarget <= 0 && flowers.length) {
+      f.target = flowers[(Math.random() * flowers.length) | 0];
+      f.retarget = 2.5 + Math.random() * 5;
+    }
+    if (f.target && flowers.length) {
+      const dx = f.target.tipX - f.x, dy = f.target.tipY - f.y;
+      const d = Math.hypot(dx, dy) || 1;
+      if (d > 26) { f.vx += (dx / d) * 0.028 * energy; f.vy += (dy / d) * 0.022 * energy; }
+      else { f.vx -= (dx / d) * 0.05; f.vy -= (dy / d) * 0.04; }
+    }
+    // 漫游噪声
+    f.vx += Math.sin(now * 0.0007 + f.ph) * 0.012 + (Math.random() - 0.5) * 0.02;
+    f.vy += Math.cos(now * 0.0009 + f.ph * 1.3) * 0.010 + (Math.random() - 0.5) * 0.016;
+    // 阻尼 + 限速
+    f.vx *= 0.965; f.vy *= 0.965;
+    const sp = Math.hypot(f.vx, f.vy), max = 0.9;
+    if (sp > max) { f.vx = f.vx / sp * max; f.vy = f.vy / sp * max; }
+    f.x += f.vx * dt * 60; f.y += f.vy * dt * 60;
+
+    // 边界
+    if (f.x < -20) { f.x = -20; f.vx = Math.abs(f.vx); }
+    if (f.x > W + 20) { f.x = W + 20; f.vx = -Math.abs(f.vx); }
+    if (f.y < HORIZON * 0.25) { f.y = HORIZON * 0.25; f.vy = Math.abs(f.vy); }
+    if (f.y > H - 10) { f.y = H - 10; f.vy = -Math.abs(f.vy); }
+  }
+}
+
+function drawFireflies(now, tDay) {
+  const base = 0.25 + 0.75 * (1 - tDay);
+  if (base < 0.3) return;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (const f of state.fireflies) {
+    const pulse = 0.35 + 0.65 * Math.pow(0.5 + 0.5 * Math.sin(now * 0.001 * f.sp + f.ph), 2.2);
+    const a = pulse * base;
+    if (a < 0.02) continue;
+    const R = f.size * 9;
+    const g = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, R);
+    g.addColorStop(0, rgba(f.hue, 0.9 * a));
+    g.addColorStop(0.28, rgba(f.hue, 0.32 * a));
+    g.addColorStop(1, rgba(f.hue, 0));
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(f.x, f.y, R, 0, TAU); ctx.fill();
+    ctx.fillStyle = rgba('#ffffff', 0.85 * a);
+    ctx.beginPath(); ctx.arc(f.x, f.y, f.size * 0.6, 0, TAU); ctx.fill();
+  }
+  ctx.restore();
+}
+
+/* ═════════════ 粒子 ═════════════ */
+function spawnPollen(x, y, color, n, spread) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * TAU;
+    const sp = (0.4 + Math.random() * 1.5) * (spread || 1);
+    state.particles.push({
+      x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 0.35,
+      life: 1, decay: 0.006 + Math.random() * 0.009,
+      r: 1 + Math.random() * 2.4, color,
+    });
+  }
+}
+
+function updateParticles(dt) {
+  const ps = state.particles;
+  for (let i = ps.length - 1; i >= 0; i--) {
+    const p = ps[i];
+    p.vy += 0.008;               // 极轻的重力
+    p.vx *= 0.985; p.vy *= 0.985;
+    p.vx += Math.sin(state.dayTime * 1.6 + p.y * 0.02) * 0.004;
+    p.x += p.vx * dt * 60; p.y += p.vy * dt * 60;
+    p.life -= p.decay * dt * 60;
+    if (p.life <= 0) ps.splice(i, 1);
+  }
+  if (ps.length > 1400) ps.splice(0, ps.length - 1400);
+}
+
+function drawParticles() {
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (const p of state.particles) {
+    const a = clamp(p.life, 0, 1) * 0.85;
+    ctx.fillStyle = rgba(p.color, a);
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r * p.life, 0, TAU); ctx.fill();
+  }
+  ctx.restore();
+}
+
+/* ═════════════ 播种涟漪 ═════════════ */
+function spawnRipple(x, y, color) {
+  state.ripples.push({ x, y, r: 2, max: 46 + Math.random() * 26, life: 1, color });
+}
+function updateRipples(dt) {
+  for (let i = state.ripples.length - 1; i >= 0; i--) {
+    const r = state.ripples[i];
+    r.r += (r.max - r.r) * 0.14 * dt * 60;
+    r.life -= 0.022 * dt * 60;
+    if (r.life <= 0) state.ripples.splice(i, 1);
+  }
+}
+function drawRipples() {
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (const r of state.ripples) {
+    ctx.strokeStyle = rgba(r.color, r.life * 0.5);
+    ctx.lineWidth = 1.4 * r.life;
+    ctx.beginPath();
+    ctx.ellipse(r.x, r.y, r.r, r.r * 0.34, 0, 0, TAU);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/* ═════════════ 昼夜与天空 ═════════════ */
+const SKY = {
+  nightT: '#04060e', nightB: '#101833',
+  duskT:  '#2a2350', duskB:  '#e08a63',
+  dayT:   '#67aed9', dayB:   '#d9edf6',
+};
+
+function updateSky() {
+  const sun = Math.sin((state.clock - 0.25) * TAU);
+  state.sun = sun;
+  state.tDay = smoothstep(-0.08, 0.32, sun);
+  state.tTwilight = clamp(1 - Math.abs(sun) / 0.38, 0, 1);
+  state.wind = Math.sin(state.dayTime * 0.37) * 0.5 + Math.sin(state.dayTime * 0.73 + 1.3) * 0.5;
+}
+
+function skyColor(top, tDay, tTw) {
+  const base = mixColor(top ? SKY.nightT : SKY.nightB, top ? SKY.dayT : SKY.dayB, tDay);
+  return mixColor(rgbToHex(base), top ? SKY.duskT : SKY.duskB, tTw);
+}
+/** mixColor 返回 rgb() 字符串，转回 hex 以便再次混合 */
+function rgbToHex(rgb) {
+  const m = rgb.match(/\d+/g);
+  return '#' + m.slice(0, 3).map(v => (+v).toString(16).padStart(2, '0')).join('');
+}
+
+function drawSky(now) {
+  const { tDay, tTwilight } = state;
+  const g = ctx.createLinearGradient(0, 0, 0, HORIZON + 40);
+  g.addColorStop(0, skyColor(true, tDay, tTwilight));
+  g.addColorStop(0.55, skyColor(false, tDay, tTwilight));
+  g.addColorStop(1, skyColor(false, tDay, tTwilight * 0.6));
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, HORIZON + 40);
+
+  // 星空
+  const starA = clamp(1 - tDay * 1.6 - tTwilight * 0.45, 0, 1);
+  if (starA > 0.02) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (const s of state.stars) {
+      const tw = 0.45 + 0.55 * Math.sin(now * 0.001 * s.sp + s.ph);
+      const a = starA * tw;
+      ctx.fillStyle = 'rgba(226,236,255,' + (a * 0.9) + ')';
+      ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, TAU); ctx.fill();
+      if (s.r > 1.1) {
+        ctx.fillStyle = 'rgba(226,236,255,' + (a * 0.13) + ')';
+        ctx.beginPath(); ctx.arc(s.x, s.y, s.r * 5, 0, TAU); ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  drawCelestial(now, tDay);
+}
+
+function drawCelestial(now, tDay) {
+  // 太阳
+  if (state.clock > 0.25 && state.clock < 0.75) {
+    const p = (state.clock - 0.25) / 0.5;
+    const x = W * (0.08 + p * 0.84);
+    const y = HORIZON - Math.sin(p * Math.PI) * HORIZON * 0.74;
+    const warm = clamp(1 - Math.sin(p * Math.PI) * 1.4, 0, 1);
+    const col = warm > 0 ? mixColor('#fff4d0', '#ff9a5c', warm) : '#fffbe8';
+    const R = clamp(Math.min(W, H) * 0.035, 22, 46);
+    const g = ctx.createRadialGradient(x, y, 0, x, y, R * 7);
+    g.addColorStop(0, 'rgba(255,246,214,.95)');
+    g.addColorStop(0.06, 'rgba(255,238,190,.55)');
+    g.addColorStop(0.3, 'rgba(255,214,150,.14)');
+    g.addColorStop(1, 'rgba(255,200,140,0)');
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(x, y, R * 7, 0, TAU); ctx.fill();
+    ctx.fillStyle = col;
+    ctx.beginPath(); ctx.arc(x, y, R, 0, TAU); ctx.fill();
+    ctx.restore();
+  }
+
+  // 月亮
+  const mp = (state.clock + 0.25) % 1;
+  if (mp < 0.5) {
+    const p = mp / 0.5;
+    const x = W * (0.08 + p * 0.84);
+    const y = HORIZON - Math.sin(p * Math.PI) * HORIZON * 0.74;
+    const R = clamp(Math.min(W, H) * 0.028, 17, 36);
+    const fade = smoothstep(0, 0.12, p) * smoothstep(0, 0.12, 1 - p);
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const g = ctx.createRadialGradient(x, y, 0, x, y, R * 6);
+    g.addColorStop(0, 'rgba(214,228,255,' + (0.55 * fade) + ')');
+    g.addColorStop(0.25, 'rgba(190,210,255,' + (0.14 * fade) + ')');
+    g.addColorStop(1, 'rgba(180,200,255,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(x, y, R * 6, 0, TAU); ctx.fill();
+    ctx.restore();
+
+    ctx.save();
+    ctx.globalAlpha = fade;
+    ctx.fillStyle = '#eef2ff';
+    ctx.beginPath(); ctx.arc(x, y, R, 0, TAU); ctx.fill();
+    // 环形山
+    ctx.fillStyle = 'rgba(196,208,236,.55)';
+    const craters = [[-0.28, -0.2, 0.19], [0.22, 0.12, 0.13], [-0.06, 0.32, 0.1], [0.3, -0.3, 0.08]];
+    for (const [cx, cy, cr] of craters) {
+      ctx.beginPath(); ctx.arc(x + cx * R, y + cy * R, cr * R, 0, TAU); ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
+/* ═════════════ 大地 ═════════════ */
+function drawGround(now) {
+  const { tDay } = state;
+
+  for (const L of state.hills) {
+    const col = mixColor(L.toneN, L.tone, tDay);
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    for (let x = 0; x <= W + 8; x += 8) ctx.lineTo(x, hillY(L, x));
+    ctx.lineTo(W, H);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // 草叶纹理
+  const near = state.hills[state.hills.length - 1];
+  const grassCol = mixColor('#0b1410', '#3a6242', tDay);
+  ctx.strokeStyle = grassCol;
+  ctx.lineCap = 'round';
+  const wind = state.wind;
+  for (const b of state.blades) {
+    const top = hillY(near, b.x);
+    const y0 = Math.max(b.y, top + 4);
+    if (y0 > H) continue;
+    const sw = (Math.sin(now * 0.0016 + b.ph) * 1.6 + wind * 3.2) * (b.y - HORIZON) / (H - HORIZON);
+    ctx.lineWidth = 0.9 + (b.y - HORIZON) / (H - HORIZON);
+    ctx.beginPath();
+    ctx.moveTo(b.x, y0);
+    ctx.quadraticCurveTo(b.x + sw * 0.5 + b.bend * 2, y0 - b.h * 0.6, b.x + sw + b.bend * 4, y0 - b.h);
+    ctx.stroke();
+  }
+
+  // 地表雾
+  const fog = ctx.createLinearGradient(0, HORIZON - 30, 0, HORIZON + 90);
+  const fogCol = mixColor('#8fa9c4', '#cfe0ea', tDay);
+  fog.addColorStop(0, rgba(rgbToHex(fogCol), 0));
+  fog.addColorStop(0.42, rgba(rgbToHex(fogCol), 0.1 + 0.06 * tDay));
+  fog.addColorStop(1, rgba(rgbToHex(fogCol), 0));
+  ctx.fillStyle = fog;
+  ctx.fillRect(0, HORIZON - 30, W, 120);
+}
+
+/* ═════════════ 主循环 ═════════════ */
+let lastT = performance.now();
+
+function frame(now) {
+  const dt = Math.min((now - lastT) / 1000, 0.05);
+  lastT = now;
+  state.dayTime += dt;
+  state.clock = (state.clock + dt / CYCLE) % 1;
+  updateSky();
+
+  ctx.clearRect(0, 0, W, H);
+  drawSky(now);
+  drawGround(now);
+
+  // 花：按 y 排序，产生前后遮挡感
+  state.flowers.sort((a, b) => a.y - b.y);
+  for (const f of state.flowers) drawFlower(f, now);
+
+  updateFireflies(dt, now);
+  drawFireflies(now, state.tDay);
+
+  updateParticles(dt);
+  drawParticles();
+  updateRipples(dt);
+  drawRipples();
+
+  drawVignette();
+  updateHUD();
+  requestAnimationFrame(frame);
+}
+
+function drawVignette() {
+  const g = ctx.createRadialGradient(W / 2, H * 0.46, Math.min(W, H) * 0.28, W / 2, H * 0.5, Math.max(W, H) * 0.78);
+  g.addColorStop(0, 'rgba(0,0,0,0)');
+  g.addColorStop(1, 'rgba(2,5,12,' + (0.34 + 0.22 * (1 - state.tDay)) + ')');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+}
+
+/* ═════════════ HUD ═════════════ */
+let hudTick = 0;
+function updateHUD() {
+  if (++hudTick % 12) return;
+  elCount.textContent = state.flowers.length;
+  const c = state.clock;
+  const hh = Math.floor(c * 24), mm = Math.floor((c * 24 % 1) * 60);
+  elClock.textContent = String(hh).padStart(2, '0') + ':' + String(mm).padStart(2, '0');
+  elPhase.textContent = c < 0.21 || c > 0.79 ? '夜'
+    : c < 0.34 ? '晨' : c < 0.62 ? '昼' : c < 0.79 ? '暮' : '夜';
+}
+
+/* ═════════════ 交互 ═════════════ */
+function findFlowerAt(x, y) {
+  let best = null, bestD = 34 * 34;
+  for (const f of state.flowers) {
+    if (f.growth < 0.6) continue;
+    const d = (f.tipX - x) ** 2 + (f.tipY - y) ** 2;
+    if (d < bestD) { bestD = d; best = f; }
+  }
+  return best;
+}
+
+function plant(x, y) {
+  if (state.flowers.length >= MAX_FLOWERS) {
+    const old = state.flowers.shift();
+    if (old) spawnPollen(old.tipX, old.tipY, old.palette.glow, 14, 1.2);
+  }
+  const seed = (Math.random() * 2 ** 31) | 0;
+  const f = makeFlower(x, y, seed, performance.now());
+  state.flowers.push(f);
+  spawnRipple(x, y, f.palette.glow);
+  spawnPollen(x, y, f.palette.petals[0], 16, 0.8);
+  save();
+  return f;
+}
+
+function pollinate(f) {
+  spawnPollen(f.tipX, f.tipY, f.palette.glow, 34, 1.5);
+  spawnPollen(f.tipX, f.tipY, '#fff6d0', 16, 0.6);
+  spawnRipple(f.tipX, f.tipY, f.palette.petals[0]);
+  // 让花轻轻一颤
+  f.swayPhase += 1.2;
+}
+
+function toWorld(e) {
+  const r = cvs.getBoundingClientRect();
+  return { x: e.clientX - r.left, y: e.clientY - r.top };
+}
+
+cvs.addEventListener('pointerdown', e => {
+  const { x, y } = toWorld(e);
+  if (y < HORIZON - 6) {
+    // 天空区域也允许种——落在最近的地面上，留个"星尘"回应
+    spawnPollen(x, y, '#cfe0ff', 10, 0.7);
+    return;
+  }
+  const hit = findFlowerAt(x, y);
+  if (hit) pollinate(hit);
+  else plant(x, y);
+  wakeHUD();
+});
+
+cvs.addEventListener('pointermove', e => {
+  const { x, y } = toWorld(e);
+  state.hoverX = x; state.hoverY = y;
+  cvs.style.cursor = findFlowerAt(x, y) ? 'pointer' : 'crosshair';
+});
+
+window.addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if (k === 'c') { state.clock = (state.clock + 0.25) % 1; updateSky(); wakeHUD(); }
+  else if (k === 'r') { state.flowers = []; save(); spawnPollen(W / 2, HORIZON, '#cfe0ff', 40, 2); }
+});
+
+/* HUD 静默：无操作 9 秒后淡出 */
+let idleTimer = null;
+function wakeHUD() {
+  hud.classList.remove('quiet');
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => hud.classList.add('quiet'), 9000);
+}
+window.addEventListener('pointermove', wakeHUD, { passive: true });
+
+/* ═════════════ 存档 ═════════════ */
+const KEY = 'secret-garden-v1';
+function save() {
+  try {
+    localStorage.setItem(KEY, JSON.stringify({
+      v: 1,
+      clock: state.clock,
+      flowers: state.flowers.map(f => ({ x: f.x / W, y: f.y / H, s: f.seed })),
+    }));
+  } catch (_) { /* 隐私模式：静默降级 */ }
+}
+function load() {
+  try {
+    const raw = localStorage.getItem(KEY);
+    if (!raw) return;
+    const d = JSON.parse(raw);
+    if (!d || d.v !== 1) return;
+    const now = performance.now();
+    for (const it of (d.flowers || [])) {
+      const f = makeFlower(it.x * W, it.y * H, it.s, now - GROW_TIME * 1000);
+      f.growth = 1;
+      state.flowers.push(f);
+    }
+    if (typeof d.clock === 'number') state.clock = d.clock;
+  } catch (_) { /* 坏档忽略 */ }
+}
+
+/* ═════════════ 启动 ═════════════ */
+resize();
+window.addEventListener('resize', () => { resize(); save(); });
+
+if (localStorage.getItem(KEY)) {
+  load();
+} else {
+  // 首次造访：先送一片野花
+  const r = mulberry32(20261002);
+  const n = Math.round(clamp(W / 130, 6, 16));
+  for (let i = 0; i < n; i++) {
+    const x = W * (0.06 + r() * 0.88);
+    const y = HORIZON + 14 + Math.pow(r(), 0.7) * (H - HORIZON - 24);
+    state.flowers.push(makeFlower(x, y, (r() * 2 ** 31) | 0, performance.now() - 3000 - r() * 2000));
+  }
+}
+
+elHint.style.opacity = '1';
+wakeHUD();
+requestAnimationFrame(t => { lastT = t; frame(t); });
+
+})();
+</script>
+</body>
+</html>
